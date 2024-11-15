@@ -1,0 +1,260 @@
+---
+title: "Untitled"
+author: "Emerald"
+date: "2024-11-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(here)
+library(lme4)
+library(lmtest)
+library(splines)
+```
+
+
+
+```{r}
+df <- read.csv(here("panss1.csv"))
+```
+
+## Question
+
+Here, the question would be whether risperidone (for the lowest dose, 2mg) is different from the placebo at reducing negative symptoms of schizophrenia. Is there evidence to say that risperidone (2mg) better than placebo in the mean population negative symptoms over 8 weeks?
+
+## Outcome
+
+The outcome variable in this analysis is the negative subscore. 
+
+```{r}
+## choose the data related to our questions
+df_clean <- df %>%
+  select(-inv,-pospan,-genpan,-totpan,-period) %>%
+  filter(treatmnt=="PLACEBO" | treatmnt=="RISPERIDONE_2MG") %>%
+  filter(time != -1)
+```
+
+## Spaghetti plot
+```{r}
+df_clean$time_jitter <- df_clean$time + 0.5*(runif(length(df_clean$time)) - 0.5) + 0.2*ifelse(df_clean$treatmnt=="PLACEBO",0,1)
+df_clean$trt_col=ifelse(df_clean$treatmnt=="PLACEBO","#EE7E77","#68A7BE")
+
+spagh_plot1 <- ggplot() +
+  geom_point(data=df_clean,aes(x=time_jitter,y=negpan,group=treatmnt,col=trt_col),alpha=0.5) +
+  geom_line(data=df_clean,aes(x=time_jitter,y=negpan,group=id,col=trt_col),alpha=0.3) +
+  ggtitle("Negpan over time")  + xlab("Time") + theme(legend.position='none')
+print(spagh_plot1)
+ggsave("sp1.png", plot = spagh_plot1, dpi = 500, width = 8, height = 6)
+
+```
+
+## fit random effect model
+```{r}
+library(lmerTest)
+## model1: assuming linear
+model1 <- lmer(data=df_clean, negpan~time + time:treatmnt + (time|id), REML = FALSE)
+summary(model1)
+## model2: with natural spline
+model2 <- lmer(data = df_clean, negpan~ns(time,3)+ns(time,3):treatmnt+(time|id), REML = FALSE)
+summary(model2)
+## null model:
+model.null <- lmer(data=df_clean, negpan~ns(time,3) + (time|id), REML = FALSE)
+summary(model.null)
+
+## whether there is treatment effect
+lrtest(model2, model.null)
+## whether natural spline improve the fit
+lrtest(model1, model2)
+
+```
+
+## get the predicted negspan
+```{r}
+df_clean$pred1 = predict(model1, re.form=NA)
+df_clean$pred2 = predict(model2, re.form=NA)
+df_clean$pred2_re = predict(model2, re.form=NULL)
+```
+
+## plot using the fitting model
+```{r}
+spagh_plot2 <- ggplot() +
+  geom_point(data=df_clean,aes(x=time_jitter,y=negpan,group=treatmnt,col=trt_col),alpha=0.2) +
+  geom_line(data=df_clean,aes(x=time_jitter,y=negpan,group=id,col=trt_col),alpha=0.1) +
+  geom_line(data=df_clean,aes(x=time,y=pred2,group=treatmnt,col=trt_col),alpha=5) + 
+  theme(legend.position='none') + ggtitle("Spaghetti plot with LMM fit") + 
+  xlab("Time") + theme(legend.position='none')
+print(spagh_plot2)
+ggsave("sp2.png", plot = spagh_plot2, dpi = 500, width = 8, height = 6)
+
+
+df_clean$time_shift <- df_clean$time + ifelse(df_clean$treatmnt=="PLACEBO",-0.1,.1)
+spagh_plot3=ggplot() +
+  geom_point(data=df_clean,aes(x=time_jitter,y=negpan,group=treatmnt,col=trt_col),alpha=0.2) +
+  geom_line(data=df_clean,aes(x=time_jitter,y=negpan,group=id,col=trt_col),alpha=0.1) +
+  geom_line(data=df_clean,aes(x=time,y=pred2,group=treatmnt,col=trt_col)) + 
+  geom_boxplot(data=df_clean,aes(x=time,y=negpan,group=time_shift,col=trt_col)) +
+  theme(legend.position='none') + ggtitle("Spaghetti plot with Boxplots and LMM fit") +
+  xlab("Time") + theme(legend.position='none')
+print(spagh_plot3)
+ggsave("sp3.png", plot = spagh_plot3, dpi = 500, width = 8, height = 6)
+
+```
+
+
+
+## display of autocorrelation
+```{r}
+# Reshape the data to wide format
+df_clean$resid=df_clean$negpan - df_clean$pred2
+df_clean_wide <- df_clean %>% select(id, time, resid) %>%
+spread(key = time, value = resid, sep = "")
+
+# Generate the scatterplot matrix
+df_clean_wide %>% select(-id) %>% pairs
+
+
+# Generate the correlation matrix
+options(digits = 2) 
+# the correlation matix
+df_clean_wide %>% select(-id) %>% cor(use="pairwise.complete.obs") 
+
+# Generate the variance matrix
+df_clean_wide %>% select(-id) %>% cov(use="pairwise.complete.obs") 
+
+```
+
+## Testing whether the two treatment groups have different mean time curves
+```{r}
+## The covariance matrix for the coefficients is estimated to be: 
+round(matrix(summary(model2)$vcov,ncol=7),5)
+## The random effects covariance matrix and residual variance estimates are: 
+summary(model2)$varcor
+
+A <- matrix(ns(c(0,1,2,4,6,8), Boundary.knots=c(0,8), knots=c(1,4)), ncol=3)
+beta_hat <- matrix(summary(model2)$coefficients[5:7,1],ncol=1)
+var_beta_hat <- summary(model2)$vcov[5:7,5:7]
+fit <- A %*% beta_hat
+var_fit <- A %*% var_beta_hat %*% t(A)
+se_fit <- sqrt(diag(var_fit))
+
+result <- data.frame(time=c(0,1,2,4,6,8), fit=fit, se_fit=se_fit, ci_l=fit-2*se_fit, ci_u=fit+2*se_fit)
+
+# plot results
+plot_difference <- ggplot(data=result,aes(x=time, y=fit)) + geom_point() + geom_line(col="#77B28C") +
+  geom_abline(intercept=0,slope=0,col="red") + 
+  geom_line(aes(x=time,y=ci_l),col="#F4D03F") +
+  geom_line(aes(x=time,y=ci_u),col="#F4D03F") + 
+  ylim(-8,15) + ylab("Mean pospan difference") + 
+  xlab("Time in weeks")
+ggsave("difference.png", plot = plot_difference, dpi = 500, width = 8, height = 6)
+
+```
+
+### Check the robustness of the test of treatment effect
+```{r}
+library(clubSandwich)
+V_robust <- vcovCR(model2, type="CR1",form = "sandwich")
+
+test_stat_robust <- matrix(beta_hat, nrow=1) %*% 
+  solve(V_robust[5:7,5:7]) %*% matrix(beta_hat, ncol=1)
+
+test_stat_model <- matrix(beta_hat,nrow=1) %*% 
+  solve(var_beta_hat) %*% matrix(beta_hat, ncol=1)
+
+p_robust <- 1-pchisq(as.numeric(test_stat_robust), df=3)
+p_model <- 1-pchisq(as.numeric(test_stat_model), df=3)
+
+robust_result <-list(test_model=test_stat_model, p_model=p_model, test_robust=test_stat_robust,
+            p_robust = p_robust)
+
+robust_result
+```
+
+
+### Get prediction for an individual
+```{r}
+# class demo on predicting an individual's symptoms curve
+#
+# choose a person at random
+#
+set.seed(123)
+id_random = sample(unique(df_clean$id),1)
+
+# get their data
+
+Y_i = matrix(df_clean$negpan[df_clean$id==id_random],ncol=1)
+trt_i = ifelse(df_clean$treatmnt[df_clean$id == id_random]=="PLACEBO",1,0)[1]
+
+# t are the times with observed symptom scores
+
+t_i = sort(matrix(df_clean$time[df_clean$id==id_random],ncol=1))
+t_new = matrix(c(0,1,2,4,6,8,9,10), ncol=1)
+
+# t-bases is the n_i (times) by 3 (degrees of freedom) matrix of basis vectors for time
+
+t_bases_i = ns(t_i,Boundary.knots=c(0,8), knots=c(1.5,4.5))
+t_bases_new = ns(t_new,Boundary.knots=c(0,8), knots=c(1.5,4.5))
+
+# add the column of 1s for the intercept to get the X matrix for person i
+
+X_i= cbind(rep(1,length(t_i)), t_bases_i,trt_i*t_bases_i)
+
+fixed_i = X_i %*% matrix(summary(model2)$coefficients[,1], ncol=1)
+
+o_i = order(t_i)
+miny = min(c(Y_i,fixed_i))*.5
+maxy = max(c(Y_i,fixed_i))*1.5
+
+X_new_i = cbind(rep(1,length(t_new)), t_bases_new, trt_i*t_bases_new)
+fixed_new_i = X_new_i %*% matrix(summary(model2)$coefficients[,1], ncol=1)  #X times beta
+
+# estimate the covariance matrices required for calculation the predictions and their variance matrix
+D = matrix(summary(model2)$varcor[[1]],ncol=2)
+sig2 = attr(VarCorr(model2), "sc")^2
+
+Z_i=cbind(rep(1,length(t_i)),t_i)
+Z_new=cbind(rep(1,length(t_new)),t_new)
+Sigma_11_i = Z_i %*% D %*% t(Z_i) + sig2*diag(rep(1,length(t_i)))
+Sigma_12_i = Z_i %*% D %*% t(Z_new)
+Sigma_21_i = t(Sigma_12_i)
+Sigma_22_i = Z_new %*% D %*% t(Z_new)
+
+mean_Y_new_i = fixed_new_i + Sigma_21_i %*% solve(Sigma_11_i) %*% (Y_i - fixed_i)
+var_Y_new_i = Sigma_22_i - Sigma_21_i %*% solve(Sigma_11_i) %*% Sigma_12_i
+se_Y_new_i = sqrt(diag(var_Y_new_i))
+
+ci_l_i = mean_Y_new_i - 2*se_Y_new_i
+ci_u_i = mean_Y_new_i + 2*se_Y_new_i
+
+
+# create prediction plot
+
+png(here("prediction_plot.png"), width = 500, height = 350)
+
+plot(t_i[o_i], Y_i[o_i], col="black", xlim=c(0,11), ylim=c(miny, maxy), type="b", 
+     ylab = "Negative symptoms", xlab = "Time (weeks)")
+
+title_grp <- df_clean$treatmnt[df_clean$id == id_random][1] %>% 
+    str_to_lower() %>% 
+    str_replace("_", " ")
+
+title(main = paste0("Predicted and observed negative symptoms for patient ", 
+                    id_random, "\n(in ", title_grp, " group)"))
+
+lines(t_new, mean_Y_new_i,col="green")
+
+lines(t_new, fixed_new_i, col="blue", type = "b", pch = 18)
+
+for (j in 1:length(t_new)){
+  lines(x= rep(t_new[j],2), y=c(ci_l_i[j],ci_u_i[j]),col="green")
+}
+
+dev.off()
+
+```
+
